@@ -11,13 +11,9 @@ get_template() and optionally from_string().
 import tempfile
 
 from django import get_version
-from django.contrib.staticfiles.templatetags.staticfiles import static
 from django.template import TemplateDoesNotExist, TemplateSyntaxError
+from django.template.context import _builtin_context_processors
 from django.template.backends.base import BaseEngine
-from django.template.backends.utils import (
-    csrf_input_lazy,
-    csrf_token_lazy,
-)
 from django.utils.module_loading import import_string
 
 from mako.template import Template as MakoTemplate
@@ -26,6 +22,13 @@ from mako import exceptions as mako_exceptions
 
 
 class MakoEngine(object):
+    DEFAULT_CONTEXT_PROCESSORS = _builtin_context_processors + (
+        'djangomako.context_processors.defaults',
+    )
+    DEFAULT_IMPORTS = [
+        'from djangomako.builtins import url, now, firstof',
+    ]
+
     """
     This is the engine that handles getting the template and
     compiling the template the code.
@@ -40,6 +43,7 @@ class MakoEngine(object):
         # Just to get a dotted module path as an/a attribute/class
         Environment = import_string(environment)
         self.context_processors = options.pop('context_processors', [])
+        options.setdefault('imports', MakoEngine.DEFAULT_IMPORTS)
         self.lookup = Environment(**options)
 
     def get_template(self, name):
@@ -59,6 +63,13 @@ class MakoEngine(object):
         :return: Returns a compiled Mako template.
         """
         return MakoTemplate(template_code, lookup=self.lookup)
+
+    @property
+    def template_context_processors(self):
+        context_processors = MakoEngine.DEFAULT_CONTEXT_PROCESSORS
+        context_processors += tuple(self.context_processors)
+        return [import_string(path)
+                for path in context_processors]
 
 
 class MakoBackend(BaseEngine):
@@ -110,7 +121,7 @@ class MakoBackend(BaseEngine):
         :return: Returns a compiled Mako template.
         """
         try:
-            return self.template_class(self.engine.from_string(template_code))
+            return self.template_class(self.engine, self.engine.from_string(template_code))
         except mako_exceptions.SyntaxException as exc:
             raise TemplateSyntaxError(exc.args)
 
@@ -124,7 +135,7 @@ class MakoBackend(BaseEngine):
         :return: Compiled Template.
         """
         try:
-            return self.template_class(self.engine.get_template(template_name))
+            return self.template_class(self.engine, self.engine.get_template(template_name))
         except mako_exceptions.TemplateLookupException as exc:
             raise TemplateDoesNotExist(exc.args)
         except mako_exceptions.CompileException as exc:
@@ -138,7 +149,8 @@ class Template(object):
     won't provide a BaseTemplate class because it would have only one
     abstract method.
     """
-    def __init__(self, template):
+    def __init__(self, engine, template):
+        self.engine = engine
         self.template = template
 
     def render(self, context=None, request=None):
@@ -154,16 +166,8 @@ class Template(object):
         if context is None:
             context = {}
 
-        context['static'] = static
-        context['url'] = self.get_reverse_url()
-
-        if request is not None:
-            # As Django doesn't have a global request object,
-            # it's useful to put it in the context.
-            context['request'] = request
-            # Passing the CSRF token is mandatory.
-            context['csrf_input'] = csrf_input_lazy(request)
-            context['csrf_token'] = csrf_token_lazy(request)
+        for processor in self.engine.template_context_processors:
+            context.update(processor(request))
 
         try:
             return self.template.render(**context)
