@@ -22,4 +22,4 @@ def now(format_string):
 
 
 def firstof(*args):
-    return next((arg for arg in args if arg is not None), None)
+    return next((arg for arg in args if bool(arg)), None)
